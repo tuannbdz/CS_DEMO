@@ -1,4 +1,4 @@
-﻿#undef UNICODE
+#undef UNICODE
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
@@ -7,92 +7,168 @@
 #include <iphlpapi.h>
 #include <iostream>
 #include <thread>
+#include <string>
 #include <cstring>
 #include <mutex>
+
 // Khắc phục lỗi linker
 #pragma comment(lib, "Ws2_32.lib")
+
 // Port cho server
-#define DEFAULT_PORT "27015"
+#define PORT "27015"
 
 // Chiều dài buffer
-#define DEFAULT_BUFLEN 512
+#define BUFLEN 512
+
+int balance = 1886;
+
+const char success[] = "Deposit successfully!\n";
+const char failure[] = "Not enough balance!\n";
+const char loginSuccess[] = "Login successfully!\n";
+const char loginFail[] = "Failed to login: incorrect account or password\n";
+const char account[] = "myaccount";
+const char password[] = "123456789";
+
+using namespace std;
 
 typedef int sem;
-std::mutex _mutex;
+mutex _mutex;
 sem s = 1;
+
 void down() {
-	std::unique_lock<std::mutex> lock(_mutex);
+	unique_lock<mutex> lock(_mutex);
 	while (s <= 0);
 	s--;
 }
 
 void up() {
-	std::unique_lock<std::mutex> lock(_mutex);
+	unique_lock<mutex> lock(_mutex);
 	s++;
 }
 
-int balance = 1886;
-//
-void CS(int depositAmount) {
+void criticalSection(int depositAmount) {
 	down();
 	balance -= depositAmount;
-	std::cout << "Balance left: " << balance << '\n';
+	cout << "A client has just made a deposit, balance left: " << balance << '\n';
 	up();
 }
-const char success[] = "Deposit successfully!\n";
-const char failure[] = "Not enough balance!\n";
 
-using namespace std;
-
-void handleClient(SOCKET ClientSocket) {
+void handleClient(SOCKET clientSocket) {
 	int iResult;
 	int iSendResult;
 
-	char recvbuf[DEFAULT_BUFLEN];
-	int recvbuflen = DEFAULT_BUFLEN;
+	int recvBufLen = BUFLEN;
+
+	char* recvAccount = new char[BUFLEN];
+	char* recvPassword = new char[BUFLEN];
+
+	iResult = recv(clientSocket, recvAccount, recvBufLen, 0);
+	if (iResult < 0) {
+		cout << "recv failed: " << WSAGetLastError() << '\n';
+		closesocket(clientSocket);
+		delete[] recvAccount;
+		recvAccount = nullptr;
+		delete[] recvPassword;
+		recvPassword = nullptr;
+		return;
+	}
+
+	iResult = recv(clientSocket, recvPassword, recvBufLen, 0);
+	if (iResult < 0) {
+		cout << "recv failed: " << WSAGetLastError() << '\n';
+		closesocket(clientSocket);
+		delete[] recvAccount;
+		recvAccount = nullptr;
+		delete[] recvPassword;
+		recvPassword = nullptr;
+		return;
+	}
+
+	if (strcmp(recvAccount, account) != 0 || strcmp(recvPassword, password) != 0) {
+		iSendResult = send(clientSocket, loginFail, (int)(strlen(loginFail) + 1), 0);
+
+		if (iSendResult == SOCKET_ERROR) {
+			cout << "send failed: " << WSAGetLastError() << '\n';
+			closesocket(clientSocket);
+			delete[] recvAccount;
+			recvAccount = nullptr;
+			delete[] recvPassword;
+			recvPassword = nullptr;
+			return;
+		}
+
+		delete[] recvAccount;
+		recvAccount = nullptr;
+		delete[] recvPassword;
+		recvPassword = nullptr;
+
+		goto SHUT_DOWN;
+	}
+
+	delete[] recvAccount;
+	recvAccount = nullptr;
+	delete[] recvPassword;
+	recvPassword = nullptr;
+
+	iSendResult = send(clientSocket, loginSuccess, (int)(strlen(loginSuccess) + 1), 0);
+	if (iSendResult == SOCKET_ERROR) {
+		cout << "send failed: " << WSAGetLastError() << '\n';
+		closesocket(clientSocket);
+		return;
+	}
+
+	char recvBuf[BUFLEN];
 
 	do {
-		iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+		iResult = recv(clientSocket, recvBuf, recvBufLen, 0);
 		if (iResult > 0) {
-			int depositAmount = atoi(recvbuf);
-			for (int i = 0; i < DEFAULT_BUFLEN; ++i) {
-				recvbuf[i] = '\0';
-			}
-			if (depositAmount < 0) {
-				break;
+			int depositAmount = atoi(recvBuf);
+
+			for (int i = 0; i < recvBufLen; i++) {
+				recvBuf[i] = '\0';
 			}
 
-			if (depositAmount > balance) {
-				iSendResult = send(ClientSocket, failure, (int)strlen(failure), 0);
+			if (depositAmount == 0) {
+				string bal = to_string(balance);
+				iSendResult = send(clientSocket, bal.c_str(), (int)(bal.size() + 1), 0);
+			}
+			else if (depositAmount > balance) {
+				iSendResult = send(clientSocket, failure, (int)(strlen(failure) + 1), 0);
 			}
 			else {
-				CS(depositAmount);
-				iSendResult = send(ClientSocket, success, (int)strlen(success), 0);
+				criticalSection(depositAmount);
+				iSendResult = send(clientSocket, success, (int)(strlen(success) + 1), 0);
 			}
+
 			if (iSendResult == SOCKET_ERROR) {
 				cout << "send failed: " << WSAGetLastError() << '\n';
-				closesocket(ClientSocket);
+				closesocket(clientSocket);
 				return;
 			}
 
-			if (balance <= 0) {
-				break;
-			}
+		}
+		else if (iResult == 0) {
+			closesocket(clientSocket);
+			cout << "A client has disconnected\n";
+			return;
 		}
 		else if (iResult < 0) {
 			cout << "recv failed: " << WSAGetLastError() << '\n';
-			closesocket(ClientSocket);
+			closesocket(clientSocket);
 			return;
 		}
+
 	} while (iResult > 0);
 
-	iResult = shutdown(ClientSocket, SD_SEND);
+SHUT_DOWN:
+	iResult = shutdown(clientSocket, SD_SEND);
 
 	if (iResult == SOCKET_ERROR) {
 		cout << "shutdown failed: " << WSAGetLastError() << '\n';
 	}
 
-	closesocket(ClientSocket);
+	closesocket(clientSocket);
+	cout << "A client has disconnected\n";
 }
 
 int main() {
@@ -116,7 +192,7 @@ int main() {
 	hints.ai_flags = AI_PASSIVE;
 
 	// 
-	iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+	iResult = getaddrinfo(NULL, PORT, &hints, &result);
 	if (iResult != 0) {
 		cout << "getaddrinfo failed: " << iResult << '\n';
 		WSACleanup();
@@ -124,13 +200,13 @@ int main() {
 	}
 
 	//
-	SOCKET ListenSocket = INVALID_SOCKET;
+	SOCKET listenSocket = INVALID_SOCKET;
 
 	// Tạo một socket để nghe các client
-	ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+	listenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
 
 	// 
-	if (ListenSocket == INVALID_SOCKET) {
+	if (listenSocket == INVALID_SOCKET) {
 		cout << "Error at socket(): " << WSAGetLastError() << '\n';
 		freeaddrinfo(result);
 		WSACleanup();
@@ -138,11 +214,11 @@ int main() {
 	}
 
 	// 
-	iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+	iResult = bind(listenSocket, result->ai_addr, (int)result->ai_addrlen);
 	if (iResult == SOCKET_ERROR) {
 		cout << "bind failed with error: " << WSAGetLastError() << '\n';
 		freeaddrinfo(result);
-		closesocket(ListenSocket);
+		closesocket(listenSocket);
 		WSACleanup();
 		return -1;
 	}
@@ -151,9 +227,9 @@ int main() {
 	freeaddrinfo(result);
 
 	//
-	if (listen(ListenSocket, SOMAXCONN) == SOCKET_ERROR) {
+	if (listen(listenSocket, SOMAXCONN) == SOCKET_ERROR) {
 		cout << "Listen failed with error: " << WSAGetLastError() << '\n';
-		closesocket(ListenSocket);
+		closesocket(listenSocket);
 		WSACleanup();
 		return -1;
 	}
@@ -161,20 +237,23 @@ int main() {
 	//
 	SOCKET clientSocket = INVALID_SOCKET;
 
-	while (balance > 0) {
-		clientSocket = accept(ListenSocket, NULL, NULL);
+	cout << "Balance left: " << balance << '\n';
+	while (true) {
+		clientSocket = accept(listenSocket, NULL, NULL);
 
 		if (clientSocket == INVALID_SOCKET) {
 			cout << "accept failed: " << WSAGetLastError() << '\n';
-			closesocket(ListenSocket);
+			closesocket(listenSocket);
 			WSACleanup();
 			return -1;
 		}
 
 		thread clientThread(handleClient, clientSocket);
 		clientThread.detach();
+		cout << "A client has connected\n";
 	}
 
+	closesocket(listenSocket);
 	WSACleanup();
 
 	return 0;
