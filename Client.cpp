@@ -1,4 +1,4 @@
-﻿#undef UNICODE
+#undef UNICODE
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
@@ -14,28 +14,30 @@
 #pragma comment (lib, "AdvApi32.lib")
 
 //
-#define DEFAULT_PORT "27015"
+#define PORT "27015"
 #define ADDR "127.0.0.1"
 
 //
-#define DEFAULT_BUFLEN 512
+#define BUFLEN 512
 
 //
-char recvbuf[DEFAULT_BUFLEN];
-int recvbuflen = DEFAULT_BUFLEN;
+char recvBuf[BUFLEN];
+int recvBufLen = BUFLEN;
+
+const char loginFail[] = "Failed to login: incorrect account or password\n";
 
 using namespace std;
 
 int main() {
     WSADATA wsaData;
-    addrinfo* result = NULL, * ptr = NULL, hints;
-    int iResult;
+    addrinfo* result = nullptr, * ptr = nullptr, hints;
+    int iResult, iSendResult;
 
     //
     iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
-        printf("WSAStartup failed with error: %d\n", iResult);
-        return 1;
+        cout << "WSAStartup failed with error: " << iResult << '\n';
+        return -1;
     }
 
     //
@@ -45,63 +47,101 @@ int main() {
     hints.ai_protocol = IPPROTO_TCP;
 
     //
-    iResult = getaddrinfo(ADDR, DEFAULT_PORT, &hints, &result);
+    iResult = getaddrinfo(ADDR, PORT, &hints, &result);
     if (iResult != 0) {
-        printf("getaddrinfo failed with error: %d\n", iResult);
+        cout << "getaddrinfo failed with error: " << iResult << '\n';
         WSACleanup();
         return -1;
     }
 
     SOCKET connectSocket = INVALID_SOCKET;
-    // Attempt to connect to an address until one succeeds
-    for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
-        // Create a SOCKET for connecting to server
+    //
+    for (ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
+        //
         connectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
         if (connectSocket == INVALID_SOCKET) {
-            printf("socket failed with error: %ld\n", WSAGetLastError());
+            cout << "socket failed with error: " << WSAGetLastError() << '\n';
             WSACleanup();
             return -1;
         }
 
-        // Connect to server.
+        //
         iResult = connect(connectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
         if (iResult == SOCKET_ERROR) {
             closesocket(connectSocket);
             connectSocket = INVALID_SOCKET;
             continue;
         }
+
         break;
     }
 
     freeaddrinfo(result);
 
     if (connectSocket == INVALID_SOCKET) {
-        printf("Unable to connect to server!\n");
+        cout << "Unable to connect to the server!\n";
         WSACleanup();
         return -1;
     }
 
+    string account, password;
+    cout << "Enter account: ";
+    getline(cin, account);
+    cout << "Enter password: ";
+    getline(cin, password);
+
+    iSendResult = send(connectSocket, account.c_str(), (int)(account.size() + 1), 0);
+    if (iSendResult == SOCKET_ERROR) {
+        cout << "send failed with error: " << WSAGetLastError() << '\n';
+        closesocket(connectSocket);
+        WSACleanup();
+        return -1;
+    }
+
+    iSendResult = send(connectSocket, password.c_str(), (int)(password.size() + 1), 0);
+    if (iSendResult == SOCKET_ERROR) {
+        cout << "send failed with error: " << WSAGetLastError() << '\n';
+        closesocket(connectSocket);
+        WSACleanup();
+        return -1;
+    }
+
+    iResult = recv(connectSocket, recvBuf, recvBufLen, 0);
+    if (iResult == SOCKET_ERROR) {
+        cout << "recv failed with error: " << WSAGetLastError() << '\n';
+        closesocket(connectSocket);
+        WSACleanup();
+        return -1;
+    }
+
+    if (strcmp(recvBuf, loginFail) == 0) {
+        cout << recvBuf << '\n';
+        goto SHUT_DOWN;
+    }
+
+    int amount;
     do {
-        cout << "Enter the amount of money you want to deposit (Enter a non-positive number to exit): ";
-        int amount;
+        cout << "Enter the amount of money you want to deposit (Enter 0 to check the balance, enter a negative number to exit): ";
         cin >> amount;
-        if (amount <= 0) {
+        if (amount < 0) {
             break;
         }
 
-        string sendbuf = to_string(amount);
-        cout << sendbuf << '\n';
-        iResult = send(connectSocket, sendbuf.c_str(), (int)sendbuf.size(), 0);
-        if (iResult == SOCKET_ERROR) {
-            printf("send failed with error: %d\n", WSAGetLastError());
+        string sendBuf = to_string(amount);
+        iSendResult = send(connectSocket, sendBuf.c_str(), (int)(sendBuf.size() + 1), 0);
+        if (iSendResult == SOCKET_ERROR) {
+            cout << "send failed with error: " << WSAGetLastError() << '\n';
             closesocket(connectSocket);
             WSACleanup();
             return -1;
         }
 
-        iResult = recv(connectSocket, recvbuf, recvbuflen, 0);
+        iResult = recv(connectSocket, recvBuf, recvBufLen, 0);
         if (iResult > 0) {
-            cout << recvbuf << '\n';
+            if (amount == 0) {
+                cout << "Your balance: ";
+            }
+            cout << recvBuf << '\n';
         }
         else if (iResult == 0) {
             cout << "Connection closed\n";
@@ -117,10 +157,11 @@ int main() {
         }
     } while (iResult > 0);
 
+SHUT_DOWN:
     //
     iResult = shutdown(connectSocket, SD_SEND);
     if (iResult == SOCKET_ERROR) {
-        printf("shutdown failed with error: %d\n", WSAGetLastError());
+        cout << "shutdown failed with error: " << WSAGetLastError() << '\n';
         closesocket(connectSocket);
         WSACleanup();
         return -1;
@@ -128,18 +169,22 @@ int main() {
 
     //
     do {
-        iResult = recv(connectSocket, recvbuf, recvbuflen, 0);
-        if (iResult > 0)
-            printf("Bytes received: %d\n", iResult);
-        else if (iResult == 0)
-            printf("Connection closed\n");
-        else
-            printf("recv failed with error: %d\n", WSAGetLastError());
+        iResult = recv(connectSocket, recvBuf, recvBufLen, 0);
+        if (iResult > 0) {
+            cout << recvBuf << '\n';
+        }
+        else if (iResult == 0) {
+            cout << "Connection closed\n";
+        }
+        else {
+            cout << "recv failed with error: " << WSAGetLastError() << '\n';
+        }
     } while (iResult > 0);
 
-    // cleanup
     closesocket(connectSocket);
     WSACleanup();
+
+    system("pause");
 
     return 0;
 }
