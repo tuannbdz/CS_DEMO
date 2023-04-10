@@ -10,49 +10,63 @@
 #include <string>
 #include <cstring>
 #include <mutex>
+#include <csignal>
 
-// Khắc phục lỗi linker
-#pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "Ws2_32.lib") // Link thư viện
 
-// Port cho server
-#define PORT "27015"
+#define PORT "27015" // Port cho server
+#define BUFLEN 512 // Chiều dài buffer
 
-// Chiều dài buffer
-#define BUFLEN 512
+SOCKET listenSocket = INVALID_SOCKET; // Socket chính của server, dùng để nhận các client
 
-int balance = 1886;
+int balance = 1886; // Số tiền trong tài khoản, dùng để mô phỏng các giao dịch ngân hàng
 
-const char success[] = "Deposit successfully!\n";
-const char failure[] = "Not enough balance!\n";
-const char loginSuccess[] = "Login successfully!\n";
-const char loginFail[] = "Failed to login: incorrect account or password\n";
+// Các thông báo của server đến với client
+const char withdrawSuccess[] = "Withdraw successfully!";
+const char depositSuccess[] = "Deposit successfully!";
+const char failure[] = "Not enough balance!";
+const char loginSuccess[] = "Login successfully!";
+const char loginFail[] = "Failed to login: incorrect account or password";
+
+// Tài khoản và mật khẩu, dùng để mô phỏng đăng nhập ngân hàng
 const char account[] = "myaccount";
 const char password[] = "123456789";
 
 using namespace std;
 
+//
 typedef int sem;
 mutex _mutex;
 sem s = 1;
 
+//
 void down() {
 	unique_lock<mutex> lock(_mutex);
 	while (s <= 0);
 	s--;
 }
 
+//
 void up() {
 	unique_lock<mutex> lock(_mutex);
 	s++;
 }
 
-void criticalSection(int depositAmount) {
+//
+void criticalSection(int amount) {
 	down();
-	balance -= depositAmount;
-	cout << "A client has just made a deposit, balance left: " << balance << '\n';
+	balance += amount;
+	if (amount > 0) {
+		cout << "A client has just made a deposit, new account balance: " << balance << '\n';
+	}
+	else {
+		cout << "A client has just made a withdrawal, balance left: " << balance << '\n';
+	}
 	up();
 }
 
+// Hàm để server quản lý một client
+// Hàm này sẽ được server tạo một thread riêng để chạy và dùng để quản lý riêng một client nào đó
 void handleClient(SOCKET clientSocket) {
 	int iResult;
 	int iSendResult;
@@ -62,6 +76,7 @@ void handleClient(SOCKET clientSocket) {
 	char* recvAccount = new char[BUFLEN];
 	char* recvPassword = new char[BUFLEN];
 
+	// Nhận tài khoản
 	iResult = recv(clientSocket, recvAccount, recvBufLen, 0);
 	if (iResult < 0) {
 		cout << "recv failed: " << WSAGetLastError() << '\n';
@@ -73,6 +88,7 @@ void handleClient(SOCKET clientSocket) {
 		return;
 	}
 
+	// Nhận mật khẩu
 	iResult = recv(clientSocket, recvPassword, recvBufLen, 0);
 	if (iResult < 0) {
 		cout << "recv failed: " << WSAGetLastError() << '\n';
@@ -84,6 +100,7 @@ void handleClient(SOCKET clientSocket) {
 		return;
 	}
 
+	// Nếu tài khoản hay mật khẩu không đúng
 	if (strcmp(recvAccount, account) != 0 || strcmp(recvPassword, password) != 0) {
 		iSendResult = send(clientSocket, loginFail, (int)(strlen(loginFail) + 1), 0);
 
@@ -110,6 +127,7 @@ void handleClient(SOCKET clientSocket) {
 	delete[] recvPassword;
 	recvPassword = nullptr;
 
+	// Gửi thông báo đến client đã đăng nhập thành công
 	iSendResult = send(clientSocket, loginSuccess, (int)(strlen(loginSuccess) + 1), 0);
 	if (iSendResult == SOCKET_ERROR) {
 		cout << "send failed: " << WSAGetLastError() << '\n';
@@ -119,25 +137,33 @@ void handleClient(SOCKET clientSocket) {
 
 	char recvBuf[BUFLEN];
 
+	// Nhận các yêu cầu của client đến khi client ngắt kết nối
 	do {
 		iResult = recv(clientSocket, recvBuf, recvBufLen, 0);
+		// Nếu nhận yêu cầu thành công
 		if (iResult > 0) {
-			int depositAmount = atoi(recvBuf);
+			int amount = atoi(recvBuf);
 
 			for (int i = 0; i < recvBufLen; i++) {
 				recvBuf[i] = '\0';
 			}
 
-			if (depositAmount == 0) {
+			if (amount == 0) {
 				string bal = to_string(balance);
 				iSendResult = send(clientSocket, bal.c_str(), (int)(bal.size() + 1), 0);
 			}
-			else if (depositAmount > balance) {
-				iSendResult = send(clientSocket, failure, (int)(strlen(failure) + 1), 0);
+			else if (amount > 0) {
+				criticalSection(amount);
+				iSendResult = send(clientSocket, depositSuccess, (int)(strlen(depositSuccess) + 1), 0);
 			}
 			else {
-				criticalSection(depositAmount);
-				iSendResult = send(clientSocket, success, (int)(strlen(success) + 1), 0);
+				if (-amount > balance) {
+					iSendResult = send(clientSocket, failure, (int)(strlen(failure) + 1), 0);
+				}
+				else {
+					criticalSection(amount);
+					iSendResult = send(clientSocket, withdrawSuccess, (int)(strlen(withdrawSuccess) + 1), 0);
+				}
 			}
 
 			if (iSendResult == SOCKET_ERROR) {
@@ -147,11 +173,15 @@ void handleClient(SOCKET clientSocket) {
 			}
 
 		}
+
+		// Nếu client ngắt kết nối
 		else if (iResult == 0) {
 			closesocket(clientSocket);
 			cout << "A client has disconnected\n";
 			return;
 		}
+
+		// Nếu lỗi trong lúc nhận yêu cầu
 		else if (iResult < 0) {
 			cout << "recv failed: " << WSAGetLastError() << '\n';
 			closesocket(clientSocket);
@@ -161,18 +191,25 @@ void handleClient(SOCKET clientSocket) {
 	} while (iResult > 0);
 
 SHUT_DOWN:
+	// Gửi thông điệp shutdown
 	iResult = shutdown(clientSocket, SD_SEND);
-
 	if (iResult == SOCKET_ERROR) {
 		cout << "shutdown failed: " << WSAGetLastError() << '\n';
 	}
 
+	// Đóng socket
 	closesocket(clientSocket);
 	cout << "A client has disconnected\n";
 }
 
+// Xử lý shutdown server thông qua interrupt Ctrl C
+void handleInterruptSignal(int signal) {
+	closesocket(listenSocket);
+	WSACleanup();
+	exit(EXIT_SUCCESS);
+}
+
 int main() {
-	// Các biến để thiết lập socket
 	WSADATA wsaData;
 	addrinfo* result = nullptr, * ptr = nullptr, hints;
 	int iResult;
@@ -191,7 +228,7 @@ int main() {
 	hints.ai_protocol = IPPROTO_TCP;
 	hints.ai_flags = AI_PASSIVE;
 
-	// 
+	// Lấy thông tin địa chỉ
 	iResult = getaddrinfo(NULL, PORT, &hints, &result);
 	if (iResult != 0) {
 		cout << "getaddrinfo failed: " << iResult << '\n';
@@ -199,13 +236,8 @@ int main() {
 		return -1;
 	}
 
-	//
-	SOCKET listenSocket = INVALID_SOCKET;
-
 	// Tạo một socket để nghe các client
 	listenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-
-	// 
 	if (listenSocket == INVALID_SOCKET) {
 		cout << "Error at socket(): " << WSAGetLastError() << '\n';
 		freeaddrinfo(result);
@@ -213,7 +245,7 @@ int main() {
 		return -1;
 	}
 
-	// 
+	// Bind socket với địa chỉ
 	iResult = bind(listenSocket, result->ai_addr, (int)result->ai_addrlen);
 	if (iResult == SOCKET_ERROR) {
 		cout << "bind failed with error: " << WSAGetLastError() << '\n';
@@ -223,10 +255,8 @@ int main() {
 		return -1;
 	}
 
-	// 
 	freeaddrinfo(result);
 
-	//
 	if (listen(listenSocket, SOMAXCONN) == SOCKET_ERROR) {
 		cout << "Listen failed with error: " << WSAGetLastError() << '\n';
 		closesocket(listenSocket);
@@ -234,12 +264,19 @@ int main() {
 		return -1;
 	}
 
-	//
+	// Socket của một tiến trình khách
 	SOCKET clientSocket = INVALID_SOCKET;
 
+	// Bắt interrupt Ctrl C
+	signal(SIGINT, handleInterruptSignal);
+
+	cout << "Press Ctrl + C to turn off the server\n";
 	cout << "Balance left: " << balance << '\n';
 	while (true) {
+		// Chờ client kết nối
 		clientSocket = accept(listenSocket, NULL, NULL);
+
+		Sleep(1);
 
 		if (clientSocket == INVALID_SOCKET) {
 			cout << "accept failed: " << WSAGetLastError() << '\n';
@@ -248,6 +285,7 @@ int main() {
 			return -1;
 		}
 
+		// Giao socket của tiến trình khách này cho một thread riêng
 		thread clientThread(handleClient, clientSocket);
 		clientThread.detach();
 		cout << "A client has connected\n";
