@@ -39,20 +39,18 @@ typedef int sem;
 mutex _mutex;
 sem s = 1;
 
-//
 void down() {
 	unique_lock<mutex> lock(_mutex);
 	while (s <= 0);
 	s--;
 }
 
-//
 void up() {
 	unique_lock<mutex> lock(_mutex);
 	s++;
 }
 
-//
+// đoạn code critical section
 void criticalSection(int amount) {
 	down();
 	balance += amount;
